@@ -1,3 +1,6 @@
 data/
 noise/
 *.zip
+*.wav
+.idea/
+*.pyc

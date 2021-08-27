@@ -5,9 +5,11 @@ import struct
 from collections import deque
 import tensorflow as tf
 
-CHUNK = 1000
-WIDTH = 2
-CHANNELS = 1
+CHUNK = 1000  # samples
+WIDTH = 2  # bytes per sample
+BIT_WIDTH = WIDTH * 8  # bits per sample
+SAMPLE_MAX = 1 << BIT_WIDTH
+CHANNELS = 1  #
 SAMPLE_RATE = 16000
 
 commands = ('down', 'go', 'left', 'no', 'right', 'stop', 'up', 'yes')

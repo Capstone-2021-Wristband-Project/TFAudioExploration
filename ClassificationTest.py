@@ -5,17 +5,25 @@ import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 import tensorflow as tf
-import tensorflow_datasets as tf_ds
 
 from tensorflow.keras.layers.experimental import preprocessing
 from tensorflow.keras import layers
 from tensorflow.keras import models
-from IPython import display
 
 
 def decode_audio(audio_binary):
     audio, _ = tf.audio.decode_wav(audio_binary)
-    return tf.squeeze(audio, axis=-1)
+    audio = tf.squeeze(audio, axis=-1)
+
+    # adjusting samples to simulate 8 bit samples
+    # comment out the following 5 lines to revert to 16 bit samples
+    audio = tf.math.multiply(tf.fill(tf.shape(audio), 32768.0), audio)
+    audio = tf.cast(audio, tf.int32)
+    audio = tf.math.divide(audio, tf.fill(tf.shape(audio), 256))
+    audio = tf.cast(audio, tf.float32)
+    audio = tf.math.divide(audio, tf.fill(tf.shape(audio), 128.0))
+
+    return audio
 
 
 def get_label(file_path):
@@ -240,7 +248,7 @@ plt.legend(['loss', 'val_loss'])
 plt.show()
 
 # model.save("model/audio_classify_test")
-model.save("model/audio_classify_aligned_test")
+model.save("model/audio_classify_aligned_8bit_test")
 
 test_audio = []
 test_labels = []

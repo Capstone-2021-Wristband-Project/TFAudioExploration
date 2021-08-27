@@ -40,3 +40,22 @@ def prompt_device_index(p: pyaudio.PyAudio) -> int:
                 print(f"\"{input_raw}\" is not a valid integer!")
 
             print("Please try again.")
+
+
+def byte_width_to_format_char(byte_width: int, signed: bool = True) -> str:
+    format_char_map = {
+        1: "b",
+        2: "h",
+        4: "i",
+        8: "q"
+    }
+
+    if byte_width not in format_char_map:
+        raise ValueError(f"Unsupported byte width {byte_width}")
+
+    format_char = format_char_map[byte_width]
+
+    if not signed:
+        format_char = format_char.upper()
+
+    return format_char
