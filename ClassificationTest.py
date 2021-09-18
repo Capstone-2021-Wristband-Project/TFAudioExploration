@@ -1,17 +1,39 @@
+import itertools
 import os
 import pathlib
+from datetime import datetime
 
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 import tensorflow as tf
+import json
 
 from tensorflow.keras.layers.experimental import preprocessing
 from tensorflow.keras import layers
 from tensorflow.keras import models
 
+import math
 
-def decode_audio(audio_binary):
+AUTOTUNE = 8
+
+
+def wav_to_tensor(audio_binary: tf.Tensor, target_effective_bit_width: int = 16) -> tf.Tensor:
+    """
+    Reads a Tensor of type string containing binary data in WAV format and convert it to a Tensor of type float32
+    between 1 and -1.
+
+
+    :param audio_binary Tensor containing binary blob in WAV format
+    :param target_effective_bit_width: the effective sample bit_with to emulate, must be between 2 and 16 or a
+           ValueError will be raised
+    :raise ValueError: if the supplied target_effective_bit_with is invalid.
+    :return: a Tensor of type float32 containing the sound data.
+    """
+
+    if not 2 <= target_effective_bit_width <= 16:
+        raise ValueError("Only bit-widths between 2 and 16 inclusive are supported")
+
     audio, _ = tf.audio.decode_wav(audio_binary)
     audio = tf.squeeze(audio, axis=-1)
 
@@ -19,14 +41,20 @@ def decode_audio(audio_binary):
     # comment out the following 5 lines to revert to 16 bit samples
     audio = tf.math.multiply(tf.fill(tf.shape(audio), 32768.0), audio)
     audio = tf.cast(audio, tf.int32)
-    audio = tf.math.divide(audio, tf.fill(tf.shape(audio), 256))
+    audio = tf.math.divide(audio, tf.fill(tf.shape(audio), 2 ** (16 - target_effective_bit_width)))
     audio = tf.cast(audio, tf.float32)
-    audio = tf.math.divide(audio, tf.fill(tf.shape(audio), 128.0))
+    audio = tf.math.divide(audio, tf.fill(tf.shape(audio), math.pow(2, target_effective_bit_width - 1)))
 
     return audio
 
 
-def get_label(file_path):
+def get_label(file_path: tf.Tensor) -> tf.RaggedTensor:
+    """
+    Retrieves the label part of the file path.
+
+    :param file_path: Tensor of type string containing the file path.
+    :return: Tensor of type string containing the label.
+    """
     parts = tf.strings.split(file_path, os.path.sep)
 
     # Note: You'll use indexing here instead of tuple unpacking to enable this
@@ -34,10 +62,10 @@ def get_label(file_path):
     return parts[-2]
 
 
-def get_waveform_and_label(file_path):
+def get_waveform_and_label(file_path, effective_bit_width):
     label = get_label(file_path)
     audio_binary = tf.io.read_file(file_path)
-    waveform = decode_audio(audio_binary)
+    waveform = wav_to_tensor(audio_binary, effective_bit_width)
     return waveform, label
 
 
@@ -68,36 +96,37 @@ def plot_spectrogram(spectrogram, ax):
     ax.pcolormesh(X, Y, log_spec)
 
 
-def get_spectrogram_and_label_id(audio, label):
+def get_spectrogram_and_label_id(audio, label, commands):
     spectrogram = get_spectrogram(audio)
     spectrogram = tf.expand_dims(spectrogram, -1)
     label_id = tf.argmax(label == commands)
     return spectrogram, label_id
 
 
-def get_spectrogram_and_expected_array(audio, label):
-    spectrogram = get_spectrogram(audio)
-    spectrogram = tf.expand_dims(spectrogram, -1)
-    label_array = tf.cast((label == commands), tf.float32)
-    constant_array = tf.constant([1.0 / len(commands)] * len(commands))
-    condition = tf.tile(
-        tf.expand_dims(tf.math.count_nonzero(label_array) == 0, axis=0),
-        tf.expand_dims(tf.constant(len(commands)), axis=0)
-    )
-    label_array = tf.where(x=constant_array, y=label_array, condition=condition)
-    # label_array = tf.transpose(tf.expand_dims(label_array, axis=1))
-    return spectrogram, label_array
+# def get_spectrogram_and_expected_array(audio, label):
+#     spectrogram = get_spectrogram(audio)
+#     spectrogram = tf.expand_dims(spectrogram, -1)
+#     label_array = tf.cast((label == commands), tf.float32)
+#     constant_array = tf.constant([1.0 / len(commands)] * len(commands))
+#     condition = tf.tile(
+#         tf.expand_dims(tf.math.count_nonzero(label_array) == 0, axis=0),
+#         tf.expand_dims(tf.constant(len(commands)), axis=0)
+#     )
+#     label_array = tf.where(x=constant_array, y=label_array, condition=condition)
+#     # label_array = tf.transpose(tf.expand_dims(label_array, axis=1))
+#     return spectrogram, label_array
 
 
-def preprocess_dataset(files, use_array=False):
+def preprocess_dataset(files, commands, effective_bit_width = 16, use_array=False):
     files_ds = tf.data.Dataset.from_tensor_slices(files)
-    output_ds = files_ds.map(get_waveform_and_label, num_parallel_calls=AUTOTUNE)
-    if use_array:
-        output_ds = output_ds.map(
-            get_spectrogram_and_expected_array, num_parallel_calls=AUTOTUNE)
-    else:
-        output_ds = output_ds.map(
-            get_spectrogram_and_label_id, num_parallel_calls=AUTOTUNE)
+    output_ds = files_ds.map(lambda x: get_waveform_and_label(x, effective_bit_width), num_parallel_calls=AUTOTUNE)
+    # if use_array:
+    #     output_ds = output_ds.map(
+    #         get_spectrogram_and_expected_array, num_parallel_calls=AUTOTUNE)
+    # else:
+    #     output_ds = output_ds.map(
+    #         get_spectrogram_and_label_id, num_parallel_calls=AUTOTUNE)
+    output_ds = output_ds.map(lambda x, y: get_spectrogram_and_label_id(x, y, commands), num_parallel_calls=AUTOTUNE)
     return output_ds
 
 
@@ -106,170 +135,208 @@ def preprocess_dataset(files, use_array=False):
 # tf.random.set_seed(seed)
 # np.random.seed(seed)
 
-#data_dir = pathlib.Path('data/mini_speech_commands')
-data_dir = pathlib.Path('data/speech_commands_aligned')
-# if not data_dir.exists():
-#     tf.keras.utils.get_file(
-#         'mini_speech_commands.zip',
-#         origin="http://storage.googleapis.com/download.tensorflow.org/data/mini_speech_commands.zip",
-#         extract=True,
-#         cache_dir='.', cache_subdir='data')
+def training_prep(data_dir: str, effective_bit_width: int = 16):
 
-commands = np.array(tf.io.gfile.listdir(str(data_dir)))
-commands = commands[commands != 'README.md']
-# commands = commands[commands != 'noise']
-print('Commands:', commands)
+    # data_dir = pathlib.Path('data/mini_speech_commands')
+    # data_dir = pathlib.Path('data/speech_commands_aligned')
+    # if not data_dir.exists():
+    #     tf.keras.utils.get_file(
+    #         'mini_speech_commands.zip',
+    #         origin="http://storage.googleapis.com/download.tensorflow.org/data/mini_speech_commands.zip",
+    #         extract=True,
+    #         cache_dir='.', cache_subdir='data')
 
-filenames = tf.io.gfile.glob(str(data_dir) + '/*/*')
-filenames = tf.random.shuffle(filenames)
-num_samples = len(filenames)
-print('Number of total examples:', num_samples)
-print('Number of examples per label:',
-      len(tf.io.gfile.listdir(str(data_dir / commands[0]))))
-print('Example file tensor:', filenames[0])
+    commands = np.array(tf.io.gfile.listdir(str(data_dir)))
+    commands = commands[commands != 'README.md']
+    # commands = commands[commands != 'noise']
+    print('Commands:', commands)
 
-num_train_samples = int(num_samples * 0.8)
-num_val_samples = int(num_samples * 0.1)
+    filenames = tf.io.gfile.glob(str(data_dir) + '/*/*')
+    filenames = tf.random.shuffle(filenames)
+    num_samples = len(filenames)
+    print('Number of total examples:', num_samples)
+    print('Number of examples per label:',
+          len(tf.io.gfile.listdir(str(data_dir + '/' + commands[0]))))
+    print('Example file tensor:', filenames[0])
 
-train_files = filenames[:num_train_samples]
-val_files = filenames[num_train_samples: num_train_samples + num_val_samples]
-test_files = filenames[num_train_samples + num_val_samples:]
+    num_train_samples = int(num_samples * 0.8)
+    num_val_samples = int(num_samples * 0.1)
 
-print('Training set size', len(train_files))
-print('Validation set size', len(val_files))
-print('Test set size', len(test_files))
+    train_files = filenames[:num_train_samples]
+    val_files = filenames[num_train_samples: num_train_samples + num_val_samples]
+    test_files = filenames[num_train_samples + num_val_samples:]
 
-AUTOTUNE = 8
-files_ds = tf.data.Dataset.from_tensor_slices(train_files)
-waveform_ds = files_ds.map(get_waveform_and_label, num_parallel_calls=AUTOTUNE)
+    print('Training set size', len(train_files))
+    print('Validation set size', len(val_files))
+    print('Test set size', len(test_files))
 
-# rows = 3
-# cols = 3
-# n = rows * cols
-# fig, axes = plt.subplots(rows, cols, figsize=(10, 12))
-# for i, (audio, label) in enumerate(waveform_ds.take(n)):
-#     r = i // cols
-#     c = i % cols
-#     ax = axes[r][c]
-#     ax.plot(audio.numpy())
-#     ax.set_yticks(np.arange(-1.2, 1.2, 0.2))
-#     label = label.numpy().decode('utf-8')
-#     ax.set_title(label)
-#
-# plt.show()
+    train_ds = preprocess_dataset(train_files, commands, effective_bit_width)
+    val_ds = preprocess_dataset(val_files, commands, effective_bit_width)
+    test_ds = preprocess_dataset(test_files, commands, effective_bit_width)
 
-for waveform, label in waveform_ds.take(1):
-    label = label.numpy().decode('utf-8')
-    spectrogram = get_spectrogram(waveform)
+    return (train_ds, val_ds, test_ds), commands
 
-print('Label:', label)
-print('Waveform shape:', waveform.shape)
-print('Spectrogram shape:', spectrogram.shape)
-print('Audio playback')
-# display.display(display.Audio(waveform, rate=16000))
 
-# fig, axes = plt.subplots(2, figsize=(12, 8))
-# timescale = np.arange(waveform.shape[0])
-# axes[0].plot(timescale, waveform.numpy())
-# axes[0].set_title('Waveform')
-# axes[0].set_xlim([0, 16000])
-# plot_spectrogram(spectrogram.numpy(), axes[1])
-# axes[1].set_title('Spectrogram')
-# plt.show()
+def train_model(data_sets,
+                commands,
+                conv1_filters: int = 32,
+                conv1_kernel: int = 5,
+                conv2_filters: int = 64,
+                conv2_kernel: int = 5,
+                dense1_units: int = 128,
+                ):
 
-spectrogram_ds = waveform_ds.map(
-    get_spectrogram_and_label_id, num_parallel_calls=AUTOTUNE)
-# rows = 3
-# cols = 3
-# n = rows * cols
-# fig, axes = plt.subplots(rows, cols, figsize=(10, 10))
-# for i, (spectrogram, label_id) in enumerate(spectrogram_ds.take(n)):
-#     r = i // cols
-#     c = i % cols
-#     ax = axes[r][c]
-#     plot_spectrogram(np.squeeze(spectrogram.numpy()), ax)
-#     ax.set_title(commands[label_id.numpy()])
-#     ax.axis('off')
-#
-# plt.show()
+    train_ds = data_sets[0]
+    val_ds = data_sets[1]
+    test_ds = data_sets[2]
 
-train_ds = spectrogram_ds
-val_ds = preprocess_dataset(val_files, use_array=False)
-test_ds = preprocess_dataset(test_files)
+    norm_layer = preprocessing.Normalization()
+    norm_layer.adapt(train_ds.map(lambda x, _: x))
 
-batch_size = 64
-train_ds = train_ds.batch(batch_size)
-val_ds = val_ds.batch(batch_size)
+    input_shape = None
+    for spectrogram, _ in train_ds.take(1):
+        input_shape = spectrogram.shape
+    print('Input shape:', input_shape)
+    num_labels = len(commands)
 
-train_ds = train_ds.cache().prefetch(AUTOTUNE)
-val_ds = val_ds.cache().prefetch(AUTOTUNE)
+    batch_size = 64
+    train_ds = train_ds.batch(batch_size)
+    val_ds = val_ds.batch(batch_size)
 
-for spectrogram, _ in spectrogram_ds.take(1):
-    input_shape = spectrogram.shape
-print('Input shape:', input_shape)
-num_labels = len(commands)
+    train_ds = train_ds.cache().prefetch(AUTOTUNE)
+    val_ds = val_ds.cache().prefetch(AUTOTUNE)
 
-norm_layer = preprocessing.Normalization()
-norm_layer.adapt(spectrogram_ds.map(lambda x, _: x))
+    model = models.Sequential([
+        layers.Input(shape=input_shape),
+        preprocessing.Resizing(32, 32),
+        norm_layer,
+        layers.Conv2D(conv1_filters, conv1_kernel, activation='relu'),
+        layers.Conv2D(conv2_filters, conv2_kernel, activation='relu'),
+        layers.MaxPooling2D(),
+        layers.Dropout(0.25),
+        layers.Flatten(),
+        layers.Dense(dense1_units, activation='relu'),
+        layers.Dropout(0.5),
+        layers.Dense(num_labels),
+    ])
 
-model = models.Sequential([
-    layers.Input(shape=input_shape),
-    preprocessing.Resizing(32, 32),
-    norm_layer,
-    layers.Conv2D(32, 5, activation='relu'),
-    layers.Conv2D(64, 5, activation='relu'),
-    layers.MaxPooling2D(),
-    layers.Dropout(0.25),
-    layers.Flatten(),
-    layers.Dense(128, activation='relu'),
-    layers.Dropout(0.5),
-    layers.Dense(num_labels),
-])
+    model.summary()
 
-model.summary()
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(),
+        loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+        metrics=['accuracy'],
+    )
 
-model.compile(
-    optimizer=tf.keras.optimizers.Adam(),
-    loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
-    metrics=['accuracy'],
-)
+    EPOCHS = 30
+    history = model.fit(
+        train_ds,
+        validation_data=val_ds,
+        epochs=EPOCHS,
+        callbacks=tf.keras.callbacks.EarlyStopping(verbose=1, patience=2),
+    )
 
-EPOCHS = 30
-history = model.fit(
-    train_ds,
-    validation_data=val_ds,
-    epochs=EPOCHS,
-    callbacks=tf.keras.callbacks.EarlyStopping(verbose=1, patience=2),
-)
+    # metrics = history.history
+    # plt.plot(history.epoch, metrics['loss'], metrics['val_loss'])
+    # plt.legend(['loss', 'val_loss'])
+    # plt.show()
 
-metrics = history.history
-plt.plot(history.epoch, metrics['loss'], metrics['val_loss'])
-plt.legend(['loss', 'val_loss'])
-plt.show()
+    test_audio = []
+    test_labels = []
+
+    for audio, label in test_ds:
+        test_audio.append(audio.numpy())
+        test_labels.append(label.numpy())
+
+    test_audio = np.array(test_audio)
+    test_labels = np.array(test_labels)
+
+    y_pred = np.argmax(model.predict(test_audio), axis=1)
+    y_true = test_labels
+
+    test_acc = sum(y_pred == y_true) / len(y_true)
+    print(f'Test set accuracy: {test_acc:.0%}')
+
+    return model, test_acc
+
+def main():
+
+    effective_bit_width = 8
+    data_dir = 'data/speech_commands_aligned'
+
+    datasets, commands = training_prep(data_dir, effective_bit_width)
+
+    conv_filters = (16, 32, 64)
+    conv_kernels = (3, 5, 7)
+    dense_units = (32, 64, 128, 256)
+
+    model_configs = itertools.product(conv_filters, conv_kernels, conv_filters, conv_kernels, dense_units)
+
+    result_file_name = "results_" + datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + ".csv"
+
+    with open(result_file_name, "w") as result_file:
+        result_file.write(
+            "data_path, bit_width, conv1_filters, conv1_kernel, conv2_filters, conv2_kernel,"
+            " dense1_units, model_path, num_param, accuracy\n"
+        )
+
+    for model_config in model_configs:
+        print(f"Running Config: {model_config}.")
+
+        model, accuracy = train_model(datasets, commands, *model_config)
+        num_params = model.count_params()
+
+        model_path = f"model/bruteforce_experiment/model-{'-'.join(map(str, model_config))}" \
+                     f"-{num_params}-{int(accuracy * 10000)}"
+        model.save(model_path)
+
+        model_dict = {
+            "data_dir": data_dir,
+            "bit_width": effective_bit_width,
+            "categories": commands.tolist(),
+            "model_config": model_config,
+            "num_param": num_params,
+            "accuracy": accuracy
+        }
+
+        with open(model_path + "/info.json", "w") as info_file:
+            json.dump(model_dict, info_file)
+
+        with open(result_file_name, "a") as result_file:
+            result_file.write(
+                f"{data_dir}, {effective_bit_width}, {', '.join(map(str, model_config))}, "
+                f"{model_path}, {num_params}, {accuracy}\n"
+            )
+        pass
+
+
 
 # model.save("model/audio_classify_test")
-model.save("model/audio_classify_aligned_8bit_test")
+# model.save("model/audio_classify_aligned_8bit_test")
+#
+# test_audio = []
+# test_labels = []
+#
+# for audio, label in test_ds:
+#     test_audio.append(audio.numpy())
+#     test_labels.append(label.numpy())
+#
+# test_audio = np.array(test_audio)
+# test_labels = np.array(test_labels)
+#
+# y_pred = np.argmax(model.predict(test_audio), axis=1)
+# y_true = test_labels
+#
+# test_acc = sum(y_pred == y_true) / len(y_true)
+# print(f'Test set accuracy: {test_acc:.0%}')
+#
+# confusion_mtx = tf.math.confusion_matrix(y_true, y_pred)
+# plt.figure(figsize=(10, 8))
+# sns.heatmap(confusion_mtx, xticklabels=commands, yticklabels=commands,
+#             annot=True, fmt='g')
+# plt.xlabel('Prediction')
+# plt.ylabel('Label')
+# plt.show()
 
-test_audio = []
-test_labels = []
-
-for audio, label in test_ds:
-    test_audio.append(audio.numpy())
-    test_labels.append(label.numpy())
-
-test_audio = np.array(test_audio)
-test_labels = np.array(test_labels)
-
-y_pred = np.argmax(model.predict(test_audio), axis=1)
-y_true = test_labels
-
-test_acc = sum(y_pred == y_true) / len(y_true)
-print(f'Test set accuracy: {test_acc:.0%}')
-
-confusion_mtx = tf.math.confusion_matrix(y_true, y_pred)
-plt.figure(figsize=(10, 8))
-sns.heatmap(confusion_mtx, xticklabels=commands, yticklabels=commands,
-            annot=True, fmt='g')
-plt.xlabel('Prediction')
-plt.ylabel('Label')
-plt.show()
+if __name__ == "__main__":
+    main()

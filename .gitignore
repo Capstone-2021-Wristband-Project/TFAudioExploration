@@ -4,3 +4,5 @@ noise/
 *.wav
 .idea/
 *.pyc
+model/bruteforce_experiment/
+*.csv
