@@ -1,22 +1,16 @@
-import itertools
-import os
-import pathlib
-from datetime import datetime
+"""
+    Common functions for audio Processing.
+"""
 
-# import matplotlib.pyplot as plt
-import numpy as np
-# import seaborn as sns
 import tensorflow as tf
-# import tensorflow_datasets as tf_ds
-import json
-
-from tensorflow.keras.layers.experimental import preprocessing
-from tensorflow.keras import layers
-from tensorflow.keras import models
-# from IPython import display
 import math
+import os
+import numpy as np
+from typing import Tuple
 
-AUTOTUNE = 8
+
+def get_hw_parallelism():
+    return os.cpu_count()
 
 
 def wav_to_tensor(audio_binary: tf.Tensor, target_effective_bit_width: int = 16) -> tf.Tensor:
@@ -85,7 +79,6 @@ def get_spectrogram(waveform):
 
     return spectrogram
 
-
 def plot_spectrogram(spectrogram, ax):
     # Convert to frequencies to log scale and transpose so that the time is
     # represented in the x-axis (columns).
@@ -104,7 +97,7 @@ def get_spectrogram_and_label_id(audio, label, commands):
     return spectrogram, label_id
 
 
-def get_spectrogram_and_expected_array(audio, label):
+def get_spectrogram_and_expected_array(audio, label, commands):
     spectrogram = get_spectrogram(audio)
     spectrogram = tf.expand_dims(spectrogram, -1)
     label_array = tf.cast((label == commands), tf.float32)
@@ -119,57 +112,21 @@ def get_spectrogram_and_expected_array(audio, label):
     return spectrogram, label_array
 
 
-
-def preprocess_dataset(files, commands, effective_bit_width = 16, use_array=False):
+def preprocess_dataset(files, commands, effective_bit_width=16,
+                       use_array=False, num_parallel_calls=get_hw_parallelism()):
     files_ds = tf.data.Dataset.from_tensor_slices(files)
-    output_ds = files_ds.map(lambda x: get_waveform_and_label(x, effective_bit_width), num_parallel_calls=AUTOTUNE)
+    output_ds = files_ds.map(lambda x: get_waveform_and_label(x, effective_bit_width),
+                             num_parallel_calls=num_parallel_calls)
     # if use_array:
     #     output_ds = output_ds.map(
     #         get_spectrogram_and_expected_array, num_parallel_calls=AUTOTUNE)
     # else:
     #     output_ds = output_ds.map(
     #         get_spectrogram_and_label_id, num_parallel_calls=AUTOTUNE)
-    output_ds = output_ds.map(lambda x, y: get_spectrogram_and_label_id(x, y, commands), num_parallel_calls=AUTOTUNE)
+    output_ds = output_ds.map(lambda x, y: get_spectrogram_and_label_id(x, y, commands),
+                              num_parallel_calls=num_parallel_calls)
     return output_ds
 
-
-def representative_dataset():
-    # Not sure if we can just pull in test_ds like this
-    for data, label in test_ds.batch(1).take(100):
-        yield data
-
-
-def tflite_convert(model):
-    # Convert the model
-    converter = tf.lite.TFLiteConverter.from_keras_model(model)
-
-    # Dynamic range quantization
-    # https://www.tensorflow.org/lite/performance/post_training_quantization#dynamic_range_quantization
-    converter.optimizations = [tf.lite.Optimize.DEFAULT]
-
-    # Take a representative dataset and perform full integer only quantization
-    # https://www.tensorflow.org/lite/performance/post_training_quantization#full_integer_quantization
-    # https://www.tensorflow.org/lite/performance/post_training_quantization#integer_only
-
-    converter.representative_dataset = representative_dataset
-    converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
-    converter.inference_input_type = tf.int8  # or tf.uint8
-    converter.inference_output_type = tf.int8  # or tf.uint8
-
-    tflite_model = converter.convert()
-
-    # Save the model.
-    with open('model/audio_classify_aligned_test.tflite', 'wb') as f:
-        f.write(tflite_model)
-
-    print("On Unix systems, run the following command to convert the tflite model to a C array:")
-    print("$ xxd -i model/audio_classify_aligned_test.tflite > model/audio_classify_aligned_test.cpp")
-
-
-# Set seed for experiment reproducibility
-# seed = 42
-# tf.random.set_seed(seed)
-# np.random.seed(seed)
 
 def training_prep(data_dir: str, effective_bit_width: int = 16):
 
@@ -213,48 +170,23 @@ def training_prep(data_dir: str, effective_bit_width: int = 16):
     return (train_ds, val_ds, test_ds), commands
 
 
-def train_model(data_sets,
-                commands,
-                conv1_filters: int = 32,
-                conv1_kernel: int = 5,
-                conv2_filters: int = 64,
-                conv2_kernel: int = 5,
-                dense1_units: int = 128,
-                ):
+def train_model(
+        datasets: Tuple[tf.data.Dataset, tf.data.Dataset, tf.data.Dataset],
+        model: tf.keras.models.Model,
+        epoch_limit: int = 30,
+        batch_size: int = 30,
+        num_parallel_runs: int = get_hw_parallelism(),
+        early_stopping_patience: int = 2
+):
+    train_ds = datasets[0]
+    val_ds = datasets[1]
+    test_ds = datasets[2]
 
-    train_ds = data_sets[0]
-    val_ds = data_sets[1]
-    test_ds = data_sets[2]
-
-    norm_layer = preprocessing.Normalization()
-    norm_layer.adapt(train_ds.map(lambda x, _: x))
-
-    input_shape = None
-    for spectrogram, _ in train_ds.take(1):
-        input_shape = spectrogram.shape
-    print('Input shape:', input_shape)
-    num_labels = len(commands)
-
-    batch_size = 64
     train_ds = train_ds.batch(batch_size)
     val_ds = val_ds.batch(batch_size)
 
-    train_ds = train_ds.cache().prefetch(AUTOTUNE)
-    val_ds = val_ds.cache().prefetch(AUTOTUNE)
-
-    model = models.Sequential([
-        layers.Input(shape=input_shape),
-        preprocessing.Resizing(32, 32),
-        norm_layer,
-        layers.Conv2D(conv1_filters, conv1_kernel, activation='relu'),
-        layers.Conv2D(conv2_filters, conv2_kernel, activation='relu'),
-        layers.MaxPooling2D(),
-        layers.Dropout(0.25),
-        layers.Flatten(),
-        layers.Dense(dense1_units, activation='relu'),
-        layers.Dropout(0.5),
-        layers.Dense(num_labels),
-    ])
+    train_ds = train_ds.cache().prefetch(num_parallel_runs)
+    val_ds = val_ds.cache().prefetch(num_parallel_runs)
 
     model.summary()
 
@@ -264,12 +196,11 @@ def train_model(data_sets,
         metrics=['accuracy'],
     )
 
-    EPOCHS = 30
     history = model.fit(
         train_ds,
         validation_data=val_ds,
-        epochs=EPOCHS,
-        callbacks=tf.keras.callbacks.EarlyStopping(verbose=1, patience=2),
+        epochs=epoch_limit,
+        callbacks=tf.keras.callbacks.EarlyStopping(verbose=1, patience=early_stopping_patience),
     )
 
     # metrics = history.history
@@ -294,95 +225,3 @@ def train_model(data_sets,
     print(f'Test set accuracy: {test_acc:.0%}')
 
     return model, test_acc
-
-def main():
-
-    effective_bit_width = 8
-    data_dir = 'data/speech_commands_aligned'
-
-    datasets, commands = training_prep(data_dir, effective_bit_width)
-
-    conv_filters = (16, 32, 64)
-    conv_kernels = (3, 5, 7)
-    dense_units = (32, 64, 128, 256)
-
-    model_configs = itertools.product(conv_filters, conv_kernels, conv_filters, conv_kernels, dense_units)
-
-    result_file_name = "results_" + datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + ".csv"
-
-    with open(result_file_name, "w") as result_file:
-        result_file.write(
-            "data_path, bit_width, conv1_filters, conv1_kernel, conv2_filters, conv2_kernel,"
-            " dense1_units, model_path, num_param, accuracy\n"
-        )
-
-    for model_config in model_configs:
-        print(f"Running Config: {model_config}.")
-
-        model, accuracy = train_model(datasets, commands, *model_config)
-        num_params = model.count_params()
-
-        model_path = f"model/bruteforce_experiment/model-{'-'.join(map(str, model_config))}" \
-                     f"-{num_params}-{int(accuracy * 10000)}"
-        model.save(model_path)
-
-        model_dict = {
-            "data_dir": data_dir,
-            "bit_width": effective_bit_width,
-            "categories": commands.tolist(),
-            "model_config": model_config,
-            "num_param": num_params,
-            "accuracy": accuracy
-        }
-
-        with open(model_path + "/info.json", "w") as info_file:
-            json.dump(model_dict, info_file)
-
-        with open(result_file_name, "a") as result_file:
-            result_file.write(
-                f"{data_dir}, {effective_bit_width}, {', '.join(map(str, model_config))}, "
-                f"{model_path}, {num_params}, {accuracy}\n"
-            )
-        pass
-
-
-
-# model.save("model/audio_classify_test")
-# model.save("model/audio_classify_aligned_8bit_test")
-#
-# test_audio = []
-# test_labels = []
-#
-# for audio, label in test_ds:
-#     test_audio.append(audio.numpy())
-#     test_labels.append(label.numpy())
-#
-# test_audio = np.array(test_audio)
-# test_labels = np.array(test_labels)
-#
-# y_pred = np.argmax(model.predict(test_audio), axis=1)
-# y_true = test_labels
-#
-# test_acc = sum(y_pred == y_true) / len(y_true)
-# print(f'Test set accuracy: {test_acc:.0%}')
-#
-# confusion_mtx = tf.math.confusion_matrix(y_true, y_pred)
-# plt.figure(figsize=(10, 8))
-# sns.heatmap(confusion_mtx, xticklabels=commands, yticklabels=commands,
-#             annot=True, fmt='g')
-# plt.xlabel('Prediction')
-# plt.ylabel('Label')
-# plt.show()
-
-confusion_mtx = tf.math.confusion_matrix(y_true, y_pred)
-# plt.figure(figsize=(10, 8))
-# # sns.heatmap(confusion_mtx, xticklabels=commands, yticklabels=commands,
-# #             annot=True, fmt='g')
-# plt.xlabel('Prediction')
-# plt.ylabel('Label')
-# plt.show()
-
-tflite_convert(model)
-
-if __name__ == "__main__":
-    main()

@@ -6,3 +6,4 @@ venv/
 .idea/
 *.pyc
 *.csv
+model/bruteforce_experiment/
