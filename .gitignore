@@ -2,4 +2,7 @@ data/
 noise/
 venv/
 *.zip
-
+*.wav
+.idea/
+*.pyc
+*.csv
