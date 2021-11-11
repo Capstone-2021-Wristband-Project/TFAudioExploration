@@ -3,16 +3,17 @@ import os
 import pathlib
 from datetime import datetime
 
-import matplotlib.pyplot as plt
+# import matplotlib.pyplot as plt
 import numpy as np
-import seaborn as sns
+# import seaborn as sns
 import tensorflow as tf
+# import tensorflow_datasets as tf_ds
 import json
 
 from tensorflow.keras.layers.experimental import preprocessing
 from tensorflow.keras import layers
 from tensorflow.keras import models
-
+# from IPython import display
 import math
 
 AUTOTUNE = 8
@@ -103,18 +104,20 @@ def get_spectrogram_and_label_id(audio, label, commands):
     return spectrogram, label_id
 
 
-# def get_spectrogram_and_expected_array(audio, label):
-#     spectrogram = get_spectrogram(audio)
-#     spectrogram = tf.expand_dims(spectrogram, -1)
-#     label_array = tf.cast((label == commands), tf.float32)
-#     constant_array = tf.constant([1.0 / len(commands)] * len(commands))
-#     condition = tf.tile(
-#         tf.expand_dims(tf.math.count_nonzero(label_array) == 0, axis=0),
-#         tf.expand_dims(tf.constant(len(commands)), axis=0)
-#     )
-#     label_array = tf.where(x=constant_array, y=label_array, condition=condition)
-#     # label_array = tf.transpose(tf.expand_dims(label_array, axis=1))
-#     return spectrogram, label_array
+def get_spectrogram_and_expected_array(audio, label):
+    spectrogram = get_spectrogram(audio)
+    spectrogram = tf.expand_dims(spectrogram, -1)
+    label_array = tf.cast((label == commands), tf.float32)
+    constant_array = tf.constant([1.0 / len(commands)] * len(commands))
+    condition = tf.tile(
+        tf.expand_dims(tf.math.count_nonzero(label_array) == 0, axis=0),
+        tf.expand_dims(tf.constant(len(commands)), axis=0)
+    )
+    label_array = tf.where(
+        x=constant_array, y=label_array, condition=condition)
+    # label_array = tf.transpose(tf.expand_dims(label_array, axis=1))
+    return spectrogram, label_array
+
 
 
 def preprocess_dataset(files, commands, effective_bit_width = 16, use_array=False):
@@ -128,6 +131,39 @@ def preprocess_dataset(files, commands, effective_bit_width = 16, use_array=Fals
     #         get_spectrogram_and_label_id, num_parallel_calls=AUTOTUNE)
     output_ds = output_ds.map(lambda x, y: get_spectrogram_and_label_id(x, y, commands), num_parallel_calls=AUTOTUNE)
     return output_ds
+
+
+def representative_dataset():
+    # Not sure if we can just pull in test_ds like this
+    for data, label in test_ds.batch(1).take(100):
+        yield data
+
+
+def tflite_convert(model):
+    # Convert the model
+    converter = tf.lite.TFLiteConverter.from_keras_model(model)
+
+    # Dynamic range quantization
+    # https://www.tensorflow.org/lite/performance/post_training_quantization#dynamic_range_quantization
+    converter.optimizations = [tf.lite.Optimize.DEFAULT]
+
+    # Take a representative dataset and perform full integer only quantization
+    # https://www.tensorflow.org/lite/performance/post_training_quantization#full_integer_quantization
+    # https://www.tensorflow.org/lite/performance/post_training_quantization#integer_only
+
+    converter.representative_dataset = representative_dataset
+    converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
+    converter.inference_input_type = tf.int8  # or tf.uint8
+    converter.inference_output_type = tf.int8  # or tf.uint8
+
+    tflite_model = converter.convert()
+
+    # Save the model.
+    with open('model/audio_classify_aligned_test.tflite', 'wb') as f:
+        f.write(tflite_model)
+
+    print("On Unix systems, run the following command to convert the tflite model to a C array:")
+    print("$ xxd -i model/audio_classify_aligned_test.tflite > model/audio_classify_aligned_test.cpp")
 
 
 # Set seed for experiment reproducibility
@@ -337,6 +373,16 @@ def main():
 # plt.xlabel('Prediction')
 # plt.ylabel('Label')
 # plt.show()
+
+confusion_mtx = tf.math.confusion_matrix(y_true, y_pred)
+# plt.figure(figsize=(10, 8))
+# # sns.heatmap(confusion_mtx, xticklabels=commands, yticklabels=commands,
+# #             annot=True, fmt='g')
+# plt.xlabel('Prediction')
+# plt.ylabel('Label')
+# plt.show()
+
+tflite_convert(model)
 
 if __name__ == "__main__":
     main()
